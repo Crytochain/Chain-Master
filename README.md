@@ -1,6 +1,6 @@
 # Chain3Go - Chain3 Go API
 
-MOAC Go API was built for MOAC chain. It was developed from MOAC RPC API, which can be used to develop Ðapp to MOAC chain. It supports both VNODE and SCS methods for MOAC.
+LBR Go API was built for LBR chain. It was developed from LBR RPC API, which can be used to develop Ðapp to LBR chain. It supports both VNODE and SCS methods for LBR.
 
 ## Chain3Go Installation
 
@@ -13,22 +13,22 @@ export GOPATH=/Users/[user]/go
 ### go get
 
 ```bash
-go get -u github.com/MOACChain/Chain3Go
+go get -u github.com/LBRChain/Chain3Go
 ```
 
-## MOAC Configuration
+## LBR Configuration
 
-### Install MOAC
+### Install LBR
 
-Download latest MOAC Vnode and SCS Releases from here: https://github.com/MOACChain/moac-core/releases
+Download latest LBR Vnode and SCS Releases from here: https://github.com/LBRChain/LBR-core/releases
 
-### Run MOAC
+### Run LBR
 
-Run moac vnode on testnet
+Run LBR vnode on testnet
 ```
-./moac --testnet
+./LBR --testnet
 ```
-Run moac scs on testnet
+Run LBR scs on testnet
 ```
 ./scsserver
 ```
@@ -47,7 +47,7 @@ miner.start()
 miner.stop()
 
 personal.unlockAccount("0x18833df6ba69b4d50acc744e8294d128ed8db1f1")
-mc.sendTransaction({from: '0x18833df6ba69b4d50acc744e8294d128ed8db1f1', to: '0x2a022eb956d1962d867dcebd8fed6ae71ee4385a', value: chain3.toSha(12, "moac")}) 
+mc.sendTransaction({from: '0x18833df6ba69b4d50acc744e8294d128ed8db1f1', to: '0x2a022eb956d1962d867dcebd8fed6ae71ee4385a', value: chain3.toSha(12, "LBR")}) 
 ```
 
 ## Chain3Go Execution
