@@ -1,278 +1,312 @@
-// Copyright 2012 The Go Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Copyright 2010 The Go Authors. All rights reserved.
+// Copyright 2011 ThePiachu. All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are
+// met:
+//
+// * Redistributions of source code must retain the above copyright
+//   notice, this list of conditions and the following disclaimer.
+// * Redistributions in binary form must reproduce the above
+//   copyright notice, this list of conditions and the following disclaimer
+//   in the documentation and/or other materials provided with the
+//   distribution.
+// * Neither the name of Google Inc. nor the names of its
+//   contributors may be used to endorse or promote products derived from
+//   this software without specific prior written permission.
+// * The name of ThePiachu may not be used to endorse or promote products
+//   derived from this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-package bn256
+package secp256k1
 
 import (
+	"crypto/elliptic"
 	"math/big"
+	"sync"
+	"unsafe"
+
+	"Chain3Go/lib/common/math"
 )
 
-// curvePoint implements the elliptic curve y²=x³+3. Points are kept in
-// Jacobian form and t=z² when valid. G₁ is the set of points of this curve on
-// GF(p).
-type curvePoint struct {
-	x, y, z, t *big.Int
+/*
+#include "libsecp256k1/include/secp256k1.h"
+extern int secp256k1_pubkey_scalar_mul(const secp256k1_context* ctx, const unsigned char *point, const unsigned char *scalar);
+*/
+import "C"
+
+// This code is from https://github.com/ThePiachu/GoBit and implements
+// several Koblitz elliptic curves over prime fields.
+//
+// The curve methods, internally, on Jacobian coordinates. For a given
+// (x, y) position on the curve, the Jacobian coordinates are (x1, y1,
+// z1) where x = x1/z1² and y = y1/z1³. The greatest speedups come
+// when the whole calculation can be performed within the transform
+// (as in ScalarMult and ScalarBaseMult). But even for Add and Double,
+// it's faster to apply and reverse the transform than to operate in
+// affine coordinates.
+
+// A BitCurve represents a Koblitz Curve with a=0.
+// See http://www.hyperelliptic.org/EFD/g1p/auto-shortw.html
+type BitCurve struct {
+	P       *big.Int // the order of the underlying field
+	N       *big.Int // the order of the base point
+	B       *big.Int // the constant of the BitCurve equation
+	Gx, Gy  *big.Int // (x,y) of the base point
+	BitSize int      // the size of the underlying field
 }
 
-var curveB = new(big.Int).SetInt64(3)
-
-// curveGen is the generator of G₁.
-var curveGen = &curvePoint{
-	new(big.Int).SetInt64(1),
-	new(big.Int).SetInt64(-2),
-	new(big.Int).SetInt64(1),
-	new(big.Int).SetInt64(1),
-}
-
-func newCurvePoint(pool *bnPool) *curvePoint {
-	return &curvePoint{
-		pool.Get(),
-		pool.Get(),
-		pool.Get(),
-		pool.Get(),
+func (BitCurve *BitCurve) Params() *elliptic.CurveParams {
+	return &elliptic.CurveParams{
+		P:       BitCurve.P,
+		N:       BitCurve.N,
+		B:       BitCurve.B,
+		Gx:      BitCurve.Gx,
+		Gy:      BitCurve.Gy,
+		BitSize: BitCurve.BitSize,
 	}
 }
 
-func (c *curvePoint) String() string {
-	c.MakeAffine(new(bnPool))
-	return "(" + c.x.String() + ", " + c.y.String() + ")"
+// IsOnBitCurve returns true if the given (x,y) lies on the BitCurve.
+func (BitCurve *BitCurve) IsOnCurve(x, y *big.Int) bool {
+	// y² = x³ + b
+	y2 := new(big.Int).Mul(y, y) //y²
+	y2.Mod(y2, BitCurve.P)       //y²%P
+
+	x3 := new(big.Int).Mul(x, x) //x²
+	x3.Mul(x3, x)                //x³
+
+	x3.Add(x3, BitCurve.B) //x³+B
+	x3.Mod(x3, BitCurve.P) //(x³+B)%P
+
+	return x3.Cmp(y2) == 0
 }
 
-func (c *curvePoint) Put(pool *bnPool) {
-	pool.Put(c.x)
-	pool.Put(c.y)
-	pool.Put(c.z)
-	pool.Put(c.t)
+//TODO: double check if the function is okay
+// affineFromJacobian reverses the Jacobian transform. See the comment at the
+// top of the file.
+func (BitCurve *BitCurve) affineFromJacobian(x, y, z *big.Int) (xOut, yOut *big.Int) {
+	zinv := new(big.Int).ModInverse(z, BitCurve.P)
+	zinvsq := new(big.Int).Mul(zinv, zinv)
+
+	xOut = new(big.Int).Mul(x, zinvsq)
+	xOut.Mod(xOut, BitCurve.P)
+	zinvsq.Mul(zinvsq, zinv)
+	yOut = new(big.Int).Mul(y, zinvsq)
+	yOut.Mod(yOut, BitCurve.P)
+	return
 }
 
-func (c *curvePoint) Set(a *curvePoint) {
-	c.x.Set(a.x)
-	c.y.Set(a.y)
-	c.z.Set(a.z)
-	c.t.Set(a.t)
+// Add returns the sum of (x1,y1) and (x2,y2)
+func (BitCurve *BitCurve) Add(x1, y1, x2, y2 *big.Int) (*big.Int, *big.Int) {
+	z := new(big.Int).SetInt64(1)
+	return BitCurve.affineFromJacobian(BitCurve.addJacobian(x1, y1, z, x2, y2, z))
 }
 
-// IsOnCurve returns true iff c is on the curve where c must be in affine form.
-func (c *curvePoint) IsOnCurve() bool {
-	yy := new(big.Int).Mul(c.y, c.y)
-	xxx := new(big.Int).Mul(c.x, c.x)
-	xxx.Mul(xxx, c.x)
-	yy.Sub(yy, xxx)
-	yy.Sub(yy, curveB)
-	if yy.Sign() < 0 || yy.Cmp(P) >= 0 {
-		yy.Mod(yy, P)
+// addJacobian takes two points in Jacobian coordinates, (x1, y1, z1) and
+// (x2, y2, z2) and returns their sum, also in Jacobian form.
+func (BitCurve *BitCurve) addJacobian(x1, y1, z1, x2, y2, z2 *big.Int) (*big.Int, *big.Int, *big.Int) {
+	// See http://hyperelliptic.org/EFD/g1p/auto-shortw-jacobian-0.html#addition-add-2007-bl
+	z1z1 := new(big.Int).Mul(z1, z1)
+	z1z1.Mod(z1z1, BitCurve.P)
+	z2z2 := new(big.Int).Mul(z2, z2)
+	z2z2.Mod(z2z2, BitCurve.P)
+
+	u1 := new(big.Int).Mul(x1, z2z2)
+	u1.Mod(u1, BitCurve.P)
+	u2 := new(big.Int).Mul(x2, z1z1)
+	u2.Mod(u2, BitCurve.P)
+	h := new(big.Int).Sub(u2, u1)
+	if h.Sign() == -1 {
+		h.Add(h, BitCurve.P)
 	}
-	return yy.Sign() == 0
+	i := new(big.Int).Lsh(h, 1)
+	i.Mul(i, i)
+	j := new(big.Int).Mul(h, i)
+
+	s1 := new(big.Int).Mul(y1, z2)
+	s1.Mul(s1, z2z2)
+	s1.Mod(s1, BitCurve.P)
+	s2 := new(big.Int).Mul(y2, z1)
+	s2.Mul(s2, z1z1)
+	s2.Mod(s2, BitCurve.P)
+	r := new(big.Int).Sub(s2, s1)
+	if r.Sign() == -1 {
+		r.Add(r, BitCurve.P)
+	}
+	r.Lsh(r, 1)
+	v := new(big.Int).Mul(u1, i)
+
+	x3 := new(big.Int).Set(r)
+	x3.Mul(x3, x3)
+	x3.Sub(x3, j)
+	x3.Sub(x3, v)
+	x3.Sub(x3, v)
+	x3.Mod(x3, BitCurve.P)
+
+	y3 := new(big.Int).Set(r)
+	v.Sub(v, x3)
+	y3.Mul(y3, v)
+	s1.Mul(s1, j)
+	s1.Lsh(s1, 1)
+	y3.Sub(y3, s1)
+	y3.Mod(y3, BitCurve.P)
+
+	z3 := new(big.Int).Add(z1, z2)
+	z3.Mul(z3, z3)
+	z3.Sub(z3, z1z1)
+	if z3.Sign() == -1 {
+		z3.Add(z3, BitCurve.P)
+	}
+	z3.Sub(z3, z2z2)
+	if z3.Sign() == -1 {
+		z3.Add(z3, BitCurve.P)
+	}
+	z3.Mul(z3, h)
+	z3.Mod(z3, BitCurve.P)
+
+	return x3, y3, z3
 }
 
-func (c *curvePoint) SetInfinity() {
-	c.z.SetInt64(0)
+// Double returns 2*(x,y)
+func (BitCurve *BitCurve) Double(x1, y1 *big.Int) (*big.Int, *big.Int) {
+	z1 := new(big.Int).SetInt64(1)
+	return BitCurve.affineFromJacobian(BitCurve.doubleJacobian(x1, y1, z1))
 }
 
-func (c *curvePoint) IsInfinity() bool {
-	return c.z.Sign() == 0
+// doubleJacobian takes a point in Jacobian coordinates, (x, y, z), and
+// returns its double, also in Jacobian form.
+func (BitCurve *BitCurve) doubleJacobian(x, y, z *big.Int) (*big.Int, *big.Int, *big.Int) {
+	// See http://hyperelliptic.org/EFD/g1p/auto-shortw-jacobian-0.html#doubling-dbl-2009-l
+
+	a := new(big.Int).Mul(x, x) //X1²
+	b := new(big.Int).Mul(y, y) //Y1²
+	c := new(big.Int).Mul(b, b) //B²
+
+	d := new(big.Int).Add(x, b) //X1+B
+	d.Mul(d, d)                 //(X1+B)²
+	d.Sub(d, a)                 //(X1+B)²-A
+	d.Sub(d, c)                 //(X1+B)²-A-C
+	d.Mul(d, big.NewInt(2))     //2*((X1+B)²-A-C)
+
+	e := new(big.Int).Mul(big.NewInt(3), a) //3*A
+	f := new(big.Int).Mul(e, e)             //E²
+
+	x3 := new(big.Int).Mul(big.NewInt(2), d) //2*D
+	x3.Sub(f, x3)                            //F-2*D
+	x3.Mod(x3, BitCurve.P)
+
+	y3 := new(big.Int).Sub(d, x3)                  //D-X3
+	y3.Mul(e, y3)                                  //E*(D-X3)
+	y3.Sub(y3, new(big.Int).Mul(big.NewInt(8), c)) //E*(D-X3)-8*C
+	y3.Mod(y3, BitCurve.P)
+
+	z3 := new(big.Int).Mul(y, z) //Y1*Z1
+	z3.Mul(big.NewInt(2), z3)    //3*Y1*Z1
+	z3.Mod(z3, BitCurve.P)
+
+	return x3, y3, z3
 }
 
-func (c *curvePoint) Add(a, b *curvePoint, pool *bnPool) {
-	if a.IsInfinity() {
-		c.Set(b)
+func (BitCurve *BitCurve) ScalarMult(Bx, By *big.Int, scalar []byte) (*big.Int, *big.Int) {
+	// Ensure scalar is exactly 32 bytes. We pad always, even if
+	// scalar is 32 bytes long, to avoid a timing side channel.
+	if len(scalar) > 32 {
+		panic("can't handle scalars > 256 bits")
+	}
+	// NOTE: potential timing issue
+	padded := make([]byte, 32)
+	copy(padded[32-len(scalar):], scalar)
+	scalar = padded
+
+	// Do the multiplication in C, updating point.
+	point := make([]byte, 64)
+	math.ReadBits(Bx, point[:32])
+	math.ReadBits(By, point[32:])
+	pointPtr := (*C.uchar)(unsafe.Pointer(&point[0]))
+	scalarPtr := (*C.uchar)(unsafe.Pointer(&scalar[0]))
+	res := C.secp256k1_pubkey_scalar_mul(context, pointPtr, scalarPtr)
+
+	// Unpack the result and clear temporaries.
+	x := new(big.Int).SetBytes(point[:32])
+	y := new(big.Int).SetBytes(point[32:])
+	for i := range point {
+		point[i] = 0
+	}
+	for i := range padded {
+		scalar[i] = 0
+	}
+	if res != 1 {
+		return nil, nil
+	}
+	return x, y
+}
+
+// ScalarBaseMult returns k*G, where G is the base point of the group and k is
+// an integer in big-endian form.
+func (BitCurve *BitCurve) ScalarBaseMult(k []byte) (*big.Int, *big.Int) {
+	return BitCurve.ScalarMult(BitCurve.Gx, BitCurve.Gy, k)
+}
+
+// Marshal converts a point into the form specified in section 4.3.6 of ANSI
+// X9.62.
+func (BitCurve *BitCurve) Marshal(x, y *big.Int) []byte {
+	byteLen := (BitCurve.BitSize + 7) >> 3
+
+	ret := make([]byte, 1+2*byteLen)
+	ret[0] = 4 // uncompressed point
+
+	xBytes := x.Bytes()
+	copy(ret[1+byteLen-len(xBytes):], xBytes)
+	yBytes := y.Bytes()
+	copy(ret[1+2*byteLen-len(yBytes):], yBytes)
+	return ret
+}
+
+// Unmarshal converts a point, serialised by Marshal, into an x, y pair. On
+// error, x = nil.
+func (BitCurve *BitCurve) Unmarshal(data []byte) (x, y *big.Int) {
+	byteLen := (BitCurve.BitSize + 7) >> 3
+	if len(data) != 1+2*byteLen {
 		return
 	}
-	if b.IsInfinity() {
-		c.Set(a)
+	if data[0] != 4 { // uncompressed form
 		return
 	}
-
-	// See http://hyperelliptic.org/EFD/g1p/auto-code/shortw/jacobian-0/addition/add-2007-bl.op3
-
-	// Normalize the points by replacing a = [x1:y1:z1] and b = [x2:y2:z2]
-	// by [u1:s1:z1·z2] and [u2:s2:z1·z2]
-	// where u1 = x1·z2², s1 = y1·z2³ and u1 = x2·z1², s2 = y2·z1³
-	z1z1 := pool.Get().Mul(a.z, a.z)
-	z1z1.Mod(z1z1, P)
-	z2z2 := pool.Get().Mul(b.z, b.z)
-	z2z2.Mod(z2z2, P)
-	u1 := pool.Get().Mul(a.x, z2z2)
-	u1.Mod(u1, P)
-	u2 := pool.Get().Mul(b.x, z1z1)
-	u2.Mod(u2, P)
-
-	t := pool.Get().Mul(b.z, z2z2)
-	t.Mod(t, P)
-	s1 := pool.Get().Mul(a.y, t)
-	s1.Mod(s1, P)
-
-	t.Mul(a.z, z1z1)
-	t.Mod(t, P)
-	s2 := pool.Get().Mul(b.y, t)
-	s2.Mod(s2, P)
-
-	// Compute x = (2h)²(s²-u1-u2)
-	// where s = (s2-s1)/(u2-u1) is the slope of the line through
-	// (u1,s1) and (u2,s2). The extra factor 2h = 2(u2-u1) comes from the value of z below.
-	// This is also:
-	// 4(s2-s1)² - 4h²(u1+u2) = 4(s2-s1)² - 4h³ - 4h²(2u1)
-	//                        = r² - j - 2v
-	// with the notations below.
-	h := pool.Get().Sub(u2, u1)
-	xEqual := h.Sign() == 0
-
-	t.Add(h, h)
-	// i = 4h²
-	i := pool.Get().Mul(t, t)
-	i.Mod(i, P)
-	// j = 4h³
-	j := pool.Get().Mul(h, i)
-	j.Mod(j, P)
-
-	t.Sub(s2, s1)
-	yEqual := t.Sign() == 0
-	if xEqual && yEqual {
-		c.Double(a, pool)
-		return
-	}
-	r := pool.Get().Add(t, t)
-
-	v := pool.Get().Mul(u1, i)
-	v.Mod(v, P)
-
-	// t4 = 4(s2-s1)²
-	t4 := pool.Get().Mul(r, r)
-	t4.Mod(t4, P)
-	t.Add(v, v)
-	t6 := pool.Get().Sub(t4, j)
-	c.x.Sub(t6, t)
-
-	// Set y = -(2h)³(s1 + s*(x/4h²-u1))
-	// This is also
-	// y = - 2·s1·j - (s2-s1)(2x - 2i·u1) = r(v-x) - 2·s1·j
-	t.Sub(v, c.x) // t7
-	t4.Mul(s1, j) // t8
-	t4.Mod(t4, P)
-	t6.Add(t4, t4) // t9
-	t4.Mul(r, t)   // t10
-	t4.Mod(t4, P)
-	c.y.Sub(t4, t6)
-
-	// Set z = 2(u2-u1)·z1·z2 = 2h·z1·z2
-	t.Add(a.z, b.z) // t11
-	t4.Mul(t, t)    // t12
-	t4.Mod(t4, P)
-	t.Sub(t4, z1z1) // t13
-	t4.Sub(t, z2z2) // t14
-	c.z.Mul(t4, h)
-	c.z.Mod(c.z, P)
-
-	pool.Put(z1z1)
-	pool.Put(z2z2)
-	pool.Put(u1)
-	pool.Put(u2)
-	pool.Put(t)
-	pool.Put(s1)
-	pool.Put(s2)
-	pool.Put(h)
-	pool.Put(i)
-	pool.Put(j)
-	pool.Put(r)
-	pool.Put(v)
-	pool.Put(t4)
-	pool.Put(t6)
+	x = new(big.Int).SetBytes(data[1 : 1+byteLen])
+	y = new(big.Int).SetBytes(data[1+byteLen:])
+	return
 }
 
-func (c *curvePoint) Double(a *curvePoint, pool *bnPool) {
-	// See http://hyperelliptic.org/EFD/g1p/auto-code/shortw/jacobian-0/doubling/dbl-2009-l.op3
-	A := pool.Get().Mul(a.x, a.x)
-	A.Mod(A, P)
-	B := pool.Get().Mul(a.y, a.y)
-	B.Mod(B, P)
-	C_ := pool.Get().Mul(B, B)
-	C_.Mod(C_, P)
+var (
+	initonce sync.Once
+	theCurve *BitCurve
+)
 
-	t := pool.Get().Add(a.x, B)
-	t2 := pool.Get().Mul(t, t)
-	t2.Mod(t2, P)
-	t.Sub(t2, A)
-	t2.Sub(t, C_)
-	d := pool.Get().Add(t2, t2)
-	t.Add(A, A)
-	e := pool.Get().Add(t, A)
-	f := pool.Get().Mul(e, e)
-	f.Mod(f, P)
-
-	t.Add(d, d)
-	c.x.Sub(f, t)
-
-	t.Add(C_, C_)
-	t2.Add(t, t)
-	t.Add(t2, t2)
-	c.y.Sub(d, c.x)
-	t2.Mul(e, c.y)
-	t2.Mod(t2, P)
-	c.y.Sub(t2, t)
-
-	t.Mul(a.y, a.z)
-	t.Mod(t, P)
-	c.z.Add(t, t)
-
-	pool.Put(A)
-	pool.Put(B)
-	pool.Put(C_)
-	pool.Put(t)
-	pool.Put(t2)
-	pool.Put(d)
-	pool.Put(e)
-	pool.Put(f)
-}
-
-func (c *curvePoint) Mul(a *curvePoint, scalar *big.Int, pool *bnPool) *curvePoint {
-	sum := newCurvePoint(pool)
-	sum.SetInfinity()
-	t := newCurvePoint(pool)
-
-	for i := scalar.BitLen(); i >= 0; i-- {
-		t.Double(sum, pool)
-		if scalar.Bit(i) != 0 {
-			sum.Add(t, a, pool)
-		} else {
-			sum.Set(t)
-		}
-	}
-
-	c.Set(sum)
-	sum.Put(pool)
-	t.Put(pool)
-	return c
-}
-
-func (c *curvePoint) MakeAffine(pool *bnPool) *curvePoint {
-	if words := c.z.Bits(); len(words) == 1 && words[0] == 1 {
-		return c
-	}
-
-	zInv := pool.Get().ModInverse(c.z, P)
-	t := pool.Get().Mul(c.y, zInv)
-	t.Mod(t, P)
-	zInv2 := pool.Get().Mul(zInv, zInv)
-	zInv2.Mod(zInv2, P)
-	c.y.Mul(t, zInv2)
-	c.y.Mod(c.y, P)
-	t.Mul(c.x, zInv2)
-	t.Mod(t, P)
-	c.x.Set(t)
-	c.z.SetInt64(1)
-	c.t.SetInt64(1)
-
-	pool.Put(zInv)
-	pool.Put(t)
-	pool.Put(zInv2)
-
-	return c
-}
-
-func (c *curvePoint) Negative(a *curvePoint) {
-	c.x.Set(a.x)
-	c.y.Neg(a.y)
-	c.z.Set(a.z)
-	c.t.SetInt64(0)
+// S256 returns a BitCurve which implements secp256k1 (see SEC 2 section 2.7.1)
+func S256() *BitCurve {
+	initonce.Do(func() {
+		// See SEC 2 section 2.7.1
+		// curve parameters taken from:
+		// http://www.secg.org/collateral/sec2_final.pdf
+		theCurve = new(BitCurve)
+		theCurve.P, _ = new(big.Int).SetString("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F", 16)
+		theCurve.N, _ = new(big.Int).SetString("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141", 16)
+		theCurve.B, _ = new(big.Int).SetString("0000000000000000000000000000000000000000000000000000000000000007", 16)
+		theCurve.Gx, _ = new(big.Int).SetString("79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798", 16)
+		theCurve.Gy, _ = new(big.Int).SetString("483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8", 16)
+		theCurve.BitSize = 256
+	})
+	return theCurve
 }
