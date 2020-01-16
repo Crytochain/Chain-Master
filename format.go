@@ -1,4 +1,4 @@
-// Copyright 2014 The LBR-core Authors
+// Copyright 2016 The LBR-core Authors
 // This file is part of the LBR-core library.
 //
 // The LBR-core library is free software: you can redistribute it and/or modify
@@ -17,9 +17,24 @@
 package common
 
 import (
-	"testing"
-
-	checker "gopkg.in/check.v1"
+	"fmt"
+	"regexp"
+	"strings"
+	"time"
 )
 
-func Test(t *testing.T) { checker.TestingT(t) }
+// PrettyDuration is a pretty printed version of a time.Duration value that cuts
+// the unnecessary precision off from the formatted textual representation.
+type PrettyDuration time.Duration
+
+var prettyDurationRe = regexp.MustCompile(`\.[0-9]+`)
+
+// String implements the Stringer interface, allowing pretty printing of duration
+// values rounded to three decimals.
+func (d PrettyDuration) String() string {
+	label := fmt.Sprintf("%v", time.Duration(d))
+	if match := prettyDurationRe.FindString(label); len(match) > 4 {
+		label = strings.Replace(label, match, match[:4], 1)
+	}
+	return label
+}
