@@ -1,40 +1,19 @@
-/*
-    This file is part of chain3.js.
+var chai = require('chai');
+var assert = chai.assert;
+var sha3 = require('../lib/utils/sha3');
+var chain3 = require('../index');
 
-    chain3.js is free software: you can redistribute it and/or modify
-    it under the terms of the GNU Lesser General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+describe('lib/utils/sha3', function () {
+    var test = function (v, e, o) {
+        it('should encode ' + v + ' to ' + e, function () {
+            assert.equal(sha3(v, o), e);
+        });
+    };
 
-    chain3.js is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU Lesser General Public License for more details.
+    test('test123', 'f81b517a242b218999ec8eec0ea6e2ddbef2a367a14e93f4a32a39e260f686ad');
+    test('test(int)', 'f4d03772bec1e62fbe8c5691e1a9101e520e8f8b5ca612123694632bf3cb51b1');
+    test('0x80', '56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421', { encoding: 'hex' });
+    test('0x80', '6b03a5eef7706e3fb52a61c19ab1122fad7237726601ac665bd4def888f0e4a0');
+    test('0x3c9229289a6125f7fdf1885a77bb12c37a8d3b4962d936f7e3084dece32a3ca1', '82ff40c0a986c6a5cfad4ddf4c3aa6996f1a7837f9c398e17e5de5cbd5a12b28', { encoding: 'hex' });
+});
 
-    You should have received a copy of the GNU Lesser General Public License
-    along with chain3.js.  If not, see <http://www.gnu.org/licenses/>.
-*/
-/** 
- * @file sha3.js
- * @author Marek Kotewicz <marek@ethdev.com>
- *  @date 2015
- * @modified for LBR project
- * @LBR lab
- * @date 2018
- */
-
-var Hex = require('crypto-js/enc-hex');
-var sha3 = require('crypto-js/sha3');
-
-module.exports = function (value, options) {
-    if (options && options.encoding === 'hex') {
-        if (value.length > 2 && value.substr(0, 2) === '0x') {
-            value = value.substr(2);
-        }
-        value = Hex.parse(value);
-    }
-
-    return sha3(value, {
-        outputLength: 256
-    }).toString();
-};

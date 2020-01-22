@@ -1,210 +1,59 @@
-/*
-    This file is part of chain3.js.
+var chai = require('chai');
+var assert = chai.assert;
+var SandboxedModule = require('sandboxed-module');
+var FakeIpcRequest = require('./helpers/FakeIpcRequest')
+var net = new FakeIpcRequest();
 
-    chain3.js is free software: you can redistribute it and/or modify
-    it under the terms of the GNU Lesser General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+SandboxedModule.registerBuiltInSourceTransformer('istanbul');
+var IpcProvider = SandboxedModule.require('../lib/chain3/ipcprovider', {
+    requires: {
+        'bignumber.js': require('bignumber.js'), 
+    },
+    singleOnly: true
+});
 
-    chain3.js is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU Lesser General Public License for more details.
+describe('lib/chain3/ipcprovider', function () {
+    describe('send', function () {
+        it('should send basic request', function () {
+            var provider = new IpcProvider('', net);
+            var result = provider.send({id: 1, method: 'mc_test'});
 
-    You should have received a copy of the GNU Lesser General Public License
-    along with chain3.js.  If not, see <http://www.gnu.org/licenses/>.
-*/
-/** @file ipcprovider.js
- * @authors:
- *   Fabian Vogelsteller <fabian@ethdev.com>
- *  @date 2015
- * @modified for LBR project
- * @LBR lab
- * @date 2018
- */
-
-"use strict";
-
-var utils = require('../utils/utils');
-var errors = require('./errors');
-
-
-var IpcProvider = function (path, net) {
-    var _this = this;
-    this.responseCallbacks = {};
-    this.path = path;
-    
-    this.connection = net.connect({path: this.path});
-
-    this.connection.on('error', function(e){
-        console.error('IPC Connection Error', e);
-        _this._timeout();
-    });
-
-    this.connection.on('end', function(){
-        _this._timeout();
-    }); 
-
-
-    // LISTEN FOR CONNECTION RESPONSES
-    this.connection.on('data', function(data) {
-        /*jshint maxcomplexity: 6 */
-
-        _this._parseResponse(data.toString()).forEach(function(result){
-
-            var id = null;
-
-            // get the id which matches the returned id
-            if(utils.isArray(result)) {
-                result.forEach(function(load){
-                    if(_this.responseCallbacks[load.id])
-                        id = load.id;
-                });
-            } else {
-                id = result.id;
-            }
-
-            // fire the callback
-            if(_this.responseCallbacks[id]) {
-                _this.responseCallbacks[id](null, result);
-                delete _this.responseCallbacks[id];
-            }
+            assert.isObject(result);
         });
     });
-};
 
-/**
-Will parse the response and make an array out of it.
-
-@method _parseResponse
-@param {String} data
-*/
-IpcProvider.prototype._parseResponse = function(data) {
-    var _this = this,
-        returnValues = [];
-    
-    // DE-CHUNKER
-    var dechunkedData = data
-        .replace(/\}[\n\r]?\{/g,'}|--|{') // }{
-        .replace(/\}\][\n\r]?\[\{/g,'}]|--|[{') // }][{
-        .replace(/\}[\n\r]?\[\{/g,'}|--|[{') // }[{
-        .replace(/\}\][\n\r]?\{/g,'}]|--|{') // }]{
-        .split('|--|');
-
-    dechunkedData.forEach(function(data){
-
-        // prepend the last chunk
-        if(_this.lastChunk)
-            data = _this.lastChunk + data;
-
-        var result = null;
-
-        try {
-            result = JSON.parse(data);
-
-        } catch(e) {
-
-            _this.lastChunk = data;
-
-            // start timeout to cancel all requests
-            clearTimeout(_this.lastChunkTimeout);
-            _this.lastChunkTimeout = setTimeout(function(){
-                _this._timeout();
-                throw errors.InvalidResponse(data);
-            }, 1000 * 15);
-
-            return;
-        }
-
-        // cancel timeout and set chunk to null
-        clearTimeout(_this.lastChunkTimeout);
-        _this.lastChunk = null;
-
-        if(result)
-            returnValues.push(result);
+    describe('sendAsync', function () {
+        it('should send basic async request', function (done) {
+            var provider = new IpcProvider('', net);
+            provider.sendAsync({id: 1, method: 'mc_test'}, function (err, result) {
+                assert.isObject(result);
+                done();
+            });
+        }); 
     });
 
-    return returnValues;
-};
+    describe('isConnected', function () {
+        it('should return a boolean', function () {
+            var provider = new IpcProvider('', net);
 
+            assert.isBoolean(provider.isConnected());
+        });
 
-/**
-Get the adds a callback to the responseCallbacks object,
-which will be called if a response matching the response Id will arrive.
+        it('should return false', function () {
+            var provider = new IpcProvider('', net);
 
-@method _addResponseCallback
-*/
-IpcProvider.prototype._addResponseCallback = function(payload, callback) {
-    var id = payload.id || payload[0].id;
-    var method = payload.method || payload[0].method;
+            provider.connection.writable = false;
 
-    this.responseCallbacks[id] = callback;
-    this.responseCallbacks[id].method = method;
-};
+            assert.isFalse(provider.isConnected());
+        });
 
-/**
-Timeout all requests when the end/error event is fired
+        it('should return true, when a net handle is set', function () {
+            var provider = new IpcProvider('', net);
 
-@method _timeout
-*/
-IpcProvider.prototype._timeout = function() {
-    for(var key in this.responseCallbacks) {
-        if(this.responseCallbacks.hasOwnProperty(key)){
-            this.responseCallbacks[key](errors.InvalidConnection('on IPC'));
-            delete this.responseCallbacks[key];
-        }
-    }
-};
+            provider.connection.writable = true;
 
-
-/**
-Check if the current connection is still valid.
-
-@method isConnected
-*/
-IpcProvider.prototype.isConnected = function() {
-    var _this = this;
-
-    // try reconnect, when connection is gone
-    if(!_this.connection.writable)
-        _this.connection.connect({path: _this.path});
-
-    return !!this.connection.writable;
-};
-
-IpcProvider.prototype.send = function (payload) {
-
-    if(this.connection.writeSync) {
-        var result;
-
-        // try reconnect, when connection is gone
-        if(!this.connection.writable)
-            this.connection.connect({path: this.path});
-
-        var data = this.connection.writeSync(JSON.stringify(payload));
-
-        try {
-            result = JSON.parse(data);
-        } catch(e) {
-            throw errors.InvalidResponse(data);                
-        }
-
-        return result;
-
-    } else {
-        throw new Error('You tried to send "'+ payload.method +'" synchronously. Synchronous requests are not supported by the IPC provider.');
-    }
-};
-
-IpcProvider.prototype.sendAsync = function (payload, callback) {
-    // try reconnect, when connection is gone
-    if(!this.connection.writable)
-        this.connection.connect({path: this.path});
-
-
-    this.connection.write(JSON.stringify(payload));
-    this._addResponseCallback(payload, callback);
-};
-
-module.exports = IpcProvider;
+            assert.isTrue(provider.isConnected());
+        }); 
+    });
+});
 
