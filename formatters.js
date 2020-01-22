@@ -17,392 +17,275 @@
 /**
  * @file formatters.js
  * @author Marek Kotewicz <marek@ethdev.com>
- * @author Fabian Vogelsteller <fabian@ethdev.com>
  *  @date 2015
  * @modified for LBR project
  * @LBR lab
  * @date 2018
  */
 
-'use strict';
-
+var BigNumber = require('bignumber.js');
 var utils = require('../utils/utils');
 var config = require('../utils/config');
-var Iban = require('./iban');
+var SolidityParam = require('./param');
+
 
 /**
- * Should the format output to a big number
+ * Formats input value to byte representation of int
+ * If value is negative, return it's two's complement
+ * If the value is floating point, round it down
  *
- * @method outputBigNumberFormatter
+ * @method formatInputInt
+ * @param {String|Number|BigNumber} value that needs to be formatted
+ * @returns {SolidityParam}
+ */
+var formatInputInt = function(value) {
+    BigNumber.config(config.MC_BIGNUMBER_ROUNDING_MODE);
+    var result = utils.padLeft(utils.toTwosComplement(value).toString(16), 64);
+    return new SolidityParam(result);
+};
+
+/**
+ * Formats input bytes
+ *
+ * @method formatInputBytes
+ * @param {String}
+ * @returns {SolidityParam}
+ */
+var formatInputBytes = function(value) {
+    var result = utils.toHex(value).substr(2);
+    var l = Math.floor((result.length + 63) / 64);
+    result = utils.padRight(result, l * 64);
+    return new SolidityParam(result);
+};
+
+/**
+ * Formats input bytes
+ *
+ * @method formatDynamicInputBytes
+ * @param {String}
+ * @returns {SolidityParam}
+ */
+var formatInputDynamicBytes = function(value) {
+    var result = utils.toHex(value).substr(2);
+    var length = result.length / 2;
+    var l = Math.floor((result.length + 63) / 64);
+    result = utils.padRight(result, l * 64);
+    return new SolidityParam(formatInputInt(length).value + result);
+};
+
+/**
+ * Formats input value to byte representation of string
+ *
+ * @method formatInputString
+ * @param {String}
+ * @returns {SolidityParam}
+ */
+var formatInputString = function(value) {
+    var result = utils.fromUtf8(value).substr(2);
+    var length = result.length / 2;
+    var l = Math.floor((result.length + 63) / 64);
+    result = utils.padRight(result, l * 64);
+    return new SolidityParam(formatInputInt(length).value + result);
+};
+
+/**
+ * Formats input value to byte representation of bool
+ *
+ * @method formatInputBool
+ * @param {Boolean}
+ * @returns {SolidityParam}
+ */
+var formatInputBool = function(value) {
+    var result = '000000000000000000000000000000000000000000000000000000000000000' + (value ? '1' : '0');
+    return new SolidityParam(result);
+};
+
+/**
+ * Formats input value to byte representation of real
+ * Values are multiplied by 2^m and encoded as integers
+ *
+ * @method formatInputReal
  * @param {String|Number|BigNumber}
- * @returns {BigNumber} object
+ * @returns {SolidityParam}
  */
-var outputBigNumberFormatter = function (number) {
-    return utils.toBigNumber(number);
-};
-
-var isPredefinedBlockNumber = function (blockNumber) {
-    return blockNumber === 'latest' || blockNumber === 'pending' || blockNumber === 'earliest';
-};
-
-// return default RecordIndex as 0
-var inputDefaultRecordIndexFormatter = function (inRecordIndex) {
-    if (inRecordIndex === undefined) {
-        return config.defaultRecordIndex;
-    }
-    return utils.fromDecimal(inRecordIndex);
-};
-
-// Record size default value if not set
-var inputDefaultRecordSizeFormatter = function (inRecordSize) {
-    if (inRecordSize === undefined) {
-        return config.defaultRecordSize;
-    }
-    return utils.fromDecimal(inRecordSize);
-};
-
-
-var inputDefaultBlockNumberFormatter = function (blockNumber) {
-    if (blockNumber === undefined) {
-        return config.defaultBlock;
-    }
-    return inputBlockNumberFormatter(blockNumber);
-};
-
-var inputBlockNumberFormatter = function (blockNumber) {
-    if (blockNumber === undefined) {
-        return undefined;
-    } else if (isPredefinedBlockNumber(blockNumber)) {
-        return blockNumber;
-    }
-    return utils.toHex(blockNumber);
+var formatInputReal = function(value) {
+    return formatInputInt(new BigNumber(value).times(new BigNumber(2).pow(128)));
 };
 
 /**
- * Formats the input of a transaction and converts all values to HEX
+ * Formats input value to tuple representation of struct
+ * data type
  *
- * @method inputCallFormatter
- * @param {Object} transaction options
- * @returns object
-*/
-var inputCallFormatter = function (options){
-
-    // console.log("Options:", options);
-    options.from = options.from || config.defaultAccount;
-
-    if (options.from) {
-        options.from = inputAddressFormatter(options.from);
-    }
-
-    if (options.to) { // it might be contract creation
-        options.to = inputAddressFormatter(options.to);
-    }
-
-    ['gasPrice', 'gas', 'value', 'nonce','shardingFlag'].filter(function (key) {
-        return options[key] !== undefined;
-    }).forEach(function(key){
-        options[key] = utils.fromDecimal(options[key]);
-    });
-
-    return options;
-};
-
-/**
- * Formats the input of a transaction and converts all values to HEX
- *
- * @method inputTransactionFormatter
- * @param {Object} transaction options
- * @returns object
-*/
-var inputTransactionFormatter = function (options){
-
-    options.from = options.from || config.defaultAccount;
-    // console.log("inputTransactionFormatter options:",options)
-    options.from = inputAddressFormatter(options.from);
-
-    if (options.to) { // it might be contract creation
-        options.to = inputAddressFormatter(options.to);
-    }
-
-    ['gasPrice', 'gas', 'value', 'nonce','shardingFlag'].filter(function (key) {
-        return options[key] !== undefined;
-    }).forEach(function(key){
-        options[key] = utils.fromDecimal(options[key]);
-    });
-
-    return options;
-};
-
-/**
- * Formats the output of a transaction to its proper values
- * used for getTransaction, getTransactionByHash
- * @method outputTransactionFormatter
- * @param {Object} tx
- * @returns {Object}
-*/
-var outputTransactionFormatter = function (tx){
-    //scsConsensusAddr
-    //controlFlag
-    if(tx.blockNumber !== null)
-        tx.blockNumber = utils.toDecimal(tx.blockNumber);
-    if(tx.transactionIndex !== null)
-        tx.transactionIndex = utils.toDecimal(tx.transactionIndex);
-    tx.nonce = utils.toDecimal(tx.nonce);
-    tx.gas = utils.toDecimal(tx.gas);
-    tx.gasPrice = utils.toBigNumber(tx.gasPrice);
-    tx.value = utils.toBigNumber(tx.value);
-    
-    return tx;
-};
-
-/**
- * Formats the output of a transaction receipt to its proper values
- *
- * @method outputTransactionReceiptFormatter
- * @param {Object} receipt
- * @returns {Object}
-*/
-var outputTransactionReceiptFormatter = function (receipt){
-    if(receipt.blockNumber !== null)
-        receipt.blockNumber = utils.toDecimal(receipt.blockNumber);
-    if(receipt.transactionIndex !== null)
-        receipt.transactionIndex = utils.toDecimal(receipt.transactionIndex);
-    receipt.cumulativeGasUsed = utils.toDecimal(receipt.cumulativeGasUsed);
-    receipt.gasUsed = utils.toDecimal(receipt.gasUsed);
-
-    if(utils.isArray(receipt.logs)) {
-        receipt.logs = receipt.logs.map(function(log){
-            return outputLogFormatter(log);
-        });
-    }
-
-    return receipt;
-};
-
-/**
- * Formats the output of a block to its proper values
- *
- * @method outputBlockFormatter
- * @param {Object} block
- * @returns {Object}
-*/
-var outputBlockFormatter = function(block) {
-
-    // transform to number
-    block.gasLimit = utils.toDecimal(block.gasLimit);
-    block.gasUsed = utils.toDecimal(block.gasUsed);
-    block.size = utils.toDecimal(block.size);
-    block.timestamp = utils.toDecimal(block.timestamp);
-    if(block.number !== null)
-        block.number = utils.toDecimal(block.number);
-
-    block.difficulty = utils.toBigNumber(block.difficulty);
-    block.totalDifficulty = utils.toBigNumber(block.totalDifficulty);
-
-    if (utils.isArray(block.transactions)) {
-        block.transactions.forEach(function(item){
-            if(!utils.isString(item))
-                return outputTransactionFormatter(item);
-        });
-    }
-
-    return block;
-};
-
-/**
- * Formats the output of a log
- *
- * @method outputLogFormatter
- * @param {Object} log object
- * @returns {Object} log
-*/
-var outputLogFormatter = function(log) {
-    if(log.blockNumber)
-        log.blockNumber = utils.toDecimal(log.blockNumber);
-    if(log.transactionIndex)
-        log.transactionIndex = utils.toDecimal(log.transactionIndex);
-    if(log.logIndex)
-        log.logIndex = utils.toDecimal(log.logIndex);
-
-    return log;
-};
-
-/**
- * Formats the input of a whisper post and converts all values to HEX
- *
- * @method inputPostFormatter
- * @param {Object} transaction object
- * @returns {Object}
-*/
-var inputPostFormatter = function(post) {
-
-    // post.payload = utils.toHex(post.payload);
-    post.ttl = utils.fromDecimal(post.ttl);
-    post.workToProve = utils.fromDecimal(post.workToProve);
-    post.priority = utils.fromDecimal(post.priority);
-
-    // fallback
-    if (!utils.isArray(post.topics)) {
-        post.topics = post.topics ? [post.topics] : [];
-    }
-
-    // format the following options
-    post.topics = post.topics.map(function(topic){
-        // convert only if not hex
-        return (topic.indexOf('0x') === 0) ? topic : utils.fromUtf8(topic);
-    });
-
-    return post;
-};
-
-/**
- * Formats the output of a received post message
- *
- * @method outputPostFormatter
+ * @method formatInputTuple
  * @param {Object}
- * @returns {Object}
+ * @returns {SolidityParam}
  */
-var outputPostFormatter = function(post){
-
-    post.expiry = utils.toDecimal(post.expiry);
-    post.sent = utils.toDecimal(post.sent);
-    post.ttl = utils.toDecimal(post.ttl);
-    post.workProved = utils.toDecimal(post.workProved);
-    // post.payloadRaw = post.payload;
-    // post.payload = utils.toAscii(post.payload);
-
-    // if (utils.isJson(post.payload)) {
-    //     post.payload = JSON.parse(post.payload);
-    // }
-
-    // format the following options
-    if (!post.topics) {
-        post.topics = [];
-    }
-    post.topics = post.topics.map(function(topic){
-        return utils.toAscii(topic);
-    });
-
-    return post;
-};
-
-/*
- * Add LBR address check
- * and convert input string to LBR address
-*/
-var inputAddressFormatter = function (address) {
-    // console.log("inputAddressFormatter:", address)
-    var iban = new Iban(address);
-    if (iban.isValid() && iban.isDirect()) {
-        return '0x' + iban.address();
-    } else if (utils.isStrictAddress(address)) {
-        return address;
-    } else if (utils.isAddress(address)) {
-        return '0x' + address;
-    } 
-    throw new Error('invalid address');
-};
-
-
-var outputSyncingFormatter = function(result) {
-    if (!result) {
-        return result;
-    }
-
-    result.startingBlock = utils.toDecimal(result.startingBlock);
-    result.currentBlock = utils.toDecimal(result.currentBlock);
-    result.highestBlock = utils.toDecimal(result.highestBlock);
-    if (result.knownStates) {
-        result.knownStates = utils.toDecimal(result.knownStates);
-        result.pulledStates = utils.toDecimal(result.pulledStates);
-    }
-
-    return result;
+var formatInputTuple = function(value) {
+    return formatInputInt(new BigNumber(value).times(new BigNumber(2).pow(128)));
 };
 
 /**
- * Formats the output of a vnode list to its proper values
+ * Check if input value is negative
  *
- * @method outputVnodesFormattertoo many elements
- * @param {Object} vnodes
- * @returns {Object}
-*/
-var outputVnodesFormatter = function(vnodes) {
+ * @method signedIsNegative
+ * @param {String} value is hex format
+ * @returns {Boolean} true if it is negative, otherwise false
+ */
+var signedIsNegative = function(value) {
+    return (new BigNumber(value.substr(0, 1), 16).toString(2).substr(0, 1)) === '1';
+};
 
-    var vnodeObjs = [];
-    var len = vnodes.length;
-    for (var i=0; i<len; i++) {
-        var vnodeStr = vnodes[i];
-        var nodeAddress = vnodeStr;
-        var ipStart = vnodeStr.substring(vnodeStr.indexOf("@")+1);
-        var ip = ipStart.substring(0, ipStart.indexOf(":"));
-        if (ip.length < 5) {
-            if (vnodeStr.indexOf("ip=") >=0) {
-                ip = vnodeStr.substring(vnodeStr.indexOf("ip=")+3);
-                if (ip.indexOf("&") >= 0) {
-                    ip = ip.substring(0, ip.indexOf("&"));
-                }
-            } else {
-                ip = ipStart.substring(0, ipStart.indexOf("[::]") + 4);
-            }
-        }
+/**
+ * Formats right-aligned output bytes to int
+ *
+ * @method formatOutputInt
+ * @param {SolidityParam} param
+ * @returns {BigNumber} right-aligned output bytes formatted to big number
+ */
+var formatOutputInt = function(param) {
+    var value = param.staticPart() || "0";
 
-        var serviceCfgIP = "";
-        var serviceCfgPort = "";
-        if (vnodeStr.indexOf("servicecfgport=") >=0) {
-            serviceCfgPort = vnodeStr.substring(vnodeStr.indexOf("servicecfgport=")+15);
-            if (serviceCfgPort.indexOf("&") >= 0) {
-                serviceCfgIP = serviceCfgPort.substring(0, serviceCfgPort.indexOf(":"));
-                serviceCfgPort = serviceCfgPort.substring(serviceCfgPort.indexOf(":")+1, serviceCfgPort.indexOf("&"));
-            }
-        }
+    // check if it's negative number
+    // it it is, return two's complement
+    if (signedIsNegative(value)) {
+        return new BigNumber(value, 16).minus(new BigNumber('ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff', 16)).minus(1);
+    }
+    return new BigNumber(value, 16);
+};
 
-        var beneficialAddress = "";
-        if (vnodeStr.indexOf("beneficialaddress=") >=0) {
-            beneficialAddress = vnodeStr.substring(vnodeStr.indexOf("beneficialaddress=")+18);
-            if (beneficialAddress.indexOf("&") >= 0) {
-                beneficialAddress = beneficialAddress.substring(0, beneficialAddress.indexOf("&"));
-            }
-        }
+/**
+ * Formats right-aligned output bytes to uint
+ *
+ * @method formatOutputUInt
+ * @param {SolidityParam}
+ * @returns {BigNumeber} right-aligned output bytes formatted to uint
+ */
+var formatOutputUInt = function(param) {
+    var value = param.staticPart() || "0";
+    return new BigNumber(value, 16);
+};
 
-        var showtopublic = "";
-        if (vnodeStr.indexOf("showtopublic=") >= 0) {
-            showtopublic = vnodeStr.substring(vnodeStr.indexOf("showtopublic=")+13);
-            if (showtopublic.indexOf("&") >= 0) {
-                showtopublic = showtopublic.substring(0, showtopublic.indexOf("&"));
-            }
-        }
-        
-        if(showtopublic.toLowerCase() === "true")
-        {
-            var vnode = {
-                nodeAddress: nodeAddress,
-                ip: ip,
-                serviceCfgPort: serviceCfgPort,
-                beneficialAddress: beneficialAddress 
-            };
-            
-            vnodeObjs.push(vnode);
-        }
+/**
+ * Formats right-aligned output bytes to real
+ *
+ * @method formatOutputReal
+ * @param {SolidityParam}
+ * @returns {BigNumber} input bytes formatted to real
+ */
+var formatOutputReal = function(param) {
+    return formatOutputInt(param).dividedBy(new BigNumber(2).pow(128));
+};
+
+/**
+ * Formats right-aligned output bytes to ureal
+ *
+ * @method formatOutputUReal
+ * @param {SolidityParam}
+ * @returns {BigNumber} input bytes formatted to ureal
+ */
+var formatOutputUReal = function(param) {
+    return formatOutputUInt(param).dividedBy(new BigNumber(2).pow(128));
+};
+
+/**
+ * Should be used to format output bool
+ *
+ * @method formatOutputBool
+ * @param {SolidityParam}
+ * @returns {Boolean} right-aligned input bytes formatted to bool
+ */
+var formatOutputBool = function(param) {
+    return param.staticPart() === '0000000000000000000000000000000000000000000000000000000000000001' ? true : false;
+};
+
+/**
+ * Should be used to format output bytes
+ *
+ * @method formatOutputBytes
+ * @param {SolidityParam} left-aligned hex representation of string
+ * @param {String} name type name
+ * @returns {String} hex string
+ */
+var formatOutputBytes = function(param, name) {
+    var matches = name.match(/^bytes([0-9]*)/);
+    var size = parseInt(matches[1]);
+    return '0x' + param.staticPart().slice(0, 2 * size);
+};
+
+/**
+ * Should be used to format output bytes
+ *
+ * @method formatOutputDynamicBytes
+ * @param {SolidityParam} left-aligned hex representation of string
+ * @returns {String} hex string
+ */
+var formatOutputDynamicBytes = function(param) {
+    var length = (new BigNumber(param.dynamicPart().slice(0, 64), 16)).toNumber() * 2;
+    return '0x' + param.dynamicPart().substr(64, length);
+};
+
+/**
+ * Should be used to format output string
+ *
+ * @method formatOutputString
+ * @param {SolidityParam} left-aligned hex representation of string
+ * @returns {String} ascii string
+ */
+var formatOutputString = function(param) {
+    var length = (new BigNumber(param.dynamicPart().slice(0, 64), 16)).toNumber() * 2;
+    return utils.toUtf8(param.dynamicPart().substr(64, length));
+};
+
+/**
+ * Should be used to format output address
+ *
+ * @method formatOutputAddress
+ * @param {SolidityParam} right-aligned input bytes
+ * @returns {String} address
+ */
+var formatOutputAddress = function(param) {
+    var value = param.staticPart();
+    return "0x" + value.slice(value.length - 40, value.length);
+};
+
+/**
+ * Should be used to format output tuple
+ * by adding field
+ * Maps the correct tuple type and name when the simplified 
+ * format in encode/decodeParameter is used
+ * @method formatOutputTuple
+ * @param {string} structName
+ * @return {{type: string, name: *}}
+ */
+var formatOutputTuple = function(structName) {
+    // var value = param.staticPart();
+    // return "0x" + value.slice(value.length - 40, value.length);
+    var type = 'tuple';
+
+    if (structName.toString().indexOf('[]') > -1) {
+        type = 'tuple[]';
+        structName = structName.slice(0, -2);
     }
 
-    return vnodeObjs;
+    return { type: type, name: structName };
 };
 
 module.exports = {
-    inputDefaultBlockNumberFormatter: inputDefaultBlockNumberFormatter,
-    inputBlockNumberFormatter: inputBlockNumberFormatter,
-    inputCallFormatter: inputCallFormatter,
-    inputTransactionFormatter: inputTransactionFormatter,
-    inputAddressFormatter: inputAddressFormatter,
-    inputPostFormatter: inputPostFormatter,
-    outputBigNumberFormatter: outputBigNumberFormatter,
-    outputTransactionFormatter: outputTransactionFormatter,
-    outputTransactionReceiptFormatter: outputTransactionReceiptFormatter,
-    outputBlockFormatter: outputBlockFormatter,
-    outputLogFormatter: outputLogFormatter,
-    outputPostFormatter: outputPostFormatter,
-    outputSyncingFormatter: outputSyncingFormatter,
-    outputVnodesFormatter: outputVnodesFormatter
+    formatInputInt: formatInputInt,
+    formatInputBytes: formatInputBytes,
+    formatInputDynamicBytes: formatInputDynamicBytes,
+    formatInputString: formatInputString,
+    formatInputBool: formatInputBool,
+    formatInputReal: formatInputReal,
+    formatInputTuple: formatInputTuple,
+    formatOutputInt: formatOutputInt,
+    formatOutputUInt: formatOutputUInt,
+    formatOutputReal: formatOutputReal,
+    formatOutputUReal: formatOutputUReal,
+    formatOutputBool: formatOutputBool,
+    formatOutputBytes: formatOutputBytes,
+    formatOutputDynamicBytes: formatOutputDynamicBytes,
+    formatOutputString: formatOutputString,
+    formatOutputAddress: formatOutputAddress,
+    formatOutputTuple: formatOutputTuple
 };
-
