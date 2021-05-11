@@ -14,7 +14,7 @@
     "bignumber.js": "^8.1.1",
     "crypto-js": "^3.1.4",
     "hash.js": "^1.1.7",
-    "lodash": "^4.17.15",
+    "lodash": "^4.17.21",
     "number-to-bn": "*",
     "secp256k1": "^3.7.1",
     "sprintf-js": "^1.1.2",
