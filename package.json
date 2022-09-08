@@ -47,7 +47,7 @@
     "gulp-util": "*",
     "istanbul": "^0.4.4",
     "jshint": "^2.10.3",
-    "jszip": "^2.5.0",
+    "jszip": "^2.7.0",
     "keccak": "^1.0.2",
     "localstorejs": "^0.1.9",
     "mocha": "^6.2.2",
